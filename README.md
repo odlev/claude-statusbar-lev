@@ -198,6 +198,12 @@ Test with sample data:
 cat examples/sample-input.json | bash statusline.sh
 ```
 
+## Support
+
+If you find this useful, you can buy me a coffee:
+
+[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal)](https://paypal.me/VitaliiCherepanov)
+
 ## License
 
 MIT
