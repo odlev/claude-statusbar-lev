@@ -1,12 +1,13 @@
 # claude-statusline
 
-A rich, two-line status bar for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI.
+A rich, three-line status bar for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI.
 
-Displays real-time session metrics directly in your terminal — model, context usage, tokens, cost, duration, git branch, cache stats, and more.
+Displays real-time session metrics directly in your terminal — model, context usage, tokens, cost, duration, git branch, cache stats, subscription usage limits, and more.
 
 ```
-Claude Opus 4.6 | [████████░░░░░░░░░░░░] 42% of 200.0K | ↓156.8K ↑23.4K | cache r:89.0K w:45.0K
+Claude Opus 4.6 | [████████░░░░░░░░░░░░] 42% of 200.0K #1 | ↓156.8K ↑23.4K | cache r:89.0K w:45.0K
 $1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ main | 📂 my-project | [N]
+5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
 ```
 
 ## Features
@@ -22,6 +23,7 @@ $1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ main | 📂 my-project | [N]
 - **Working directory** — project folder name
 - **Vim mode** — shows `[N]` or `[I]` indicator when vim mode is active
 - **Agent name** — shows active sub-agent name
+- **Usage limits** — 5-hour and 7-day subscription quota with progress bars and reset countdown
 - **200K warning** — warns when context exceeds 200K tokens
 - **Context threshold alerts** — optional flag files at 70/85/95% for hook integration
 - **macOS notifications** — optional native alerts at 85% and 95% thresholds
@@ -29,8 +31,10 @@ $1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ main | 📂 my-project | [N]
 ## Requirements
 
 - **jq** — JSON processor (`brew install jq` / `apt install jq`)
+- **curl** — for usage limits API calls (pre-installed on most systems)
 - **Claude Code CLI** — v1.0+ with status line support
 - **bash** — works with macOS bash 3.2+ and modern bash 4/5
+- **Keychain/libsecret** — for OAuth token access (usage limits feature)
 
 ## Installation
 
@@ -104,9 +108,10 @@ Claude Code pipes a JSON object to stdin on every status update. The JSON contai
 The script:
 1. Parses all 16 fields in a **single `jq` call** using `@sh` for safe eval
 2. Formats values with **pure bash** (no subshells, no `bc`, no `awk`)
-3. Outputs two ANSI-colored lines
+3. Fetches usage limits via **background API call** with 2-minute cache
+4. Outputs three ANSI-colored lines
 
-Total execution: **~18ms** on macOS.
+Total execution: **~20ms** on macOS (usage limits cached, fetched in background).
 
 ## Configuration
 
@@ -145,18 +150,34 @@ export STATUSLINE_FLAG_DIR=/tmp/claude-flags
 
 At 85% context usage, a "Glass" notification sounds. At 95%, a "Sosumi" alert fires. These use `osascript` and fail silently on Linux.
 
+### Usage limits
+
+Fetches subscription quota data from `https://api.anthropic.com/api/oauth/usage` using your OAuth token. Cached for 2 minutes with background refresh — does not block the status line.
+
+Requires `claude.ai` OAuth login. Token is read from:
+- **macOS**: Keychain (`security find-generic-password`)
+- **Linux**: libsecret (`secret-tool lookup`)
+- **Windows**: Credential Manager (via PowerShell)
+
+Disable this feature:
+
+```bash
+export STATUSLINE_USAGE_LIMITS=0
+```
+
 ## Output Layout
 
 ### Line 1
 
 ```
-Model | [████░░░░░░░░] PCT% of SIZE | ↓input ↑output | cache r:READ w:WRITE
+Model | [████░░░░░░░░] PCT% of SIZE #W | ↓input ↑output | cache r:READ w:WRITE
 ```
 
 | Segment | Color | Description |
 |---------|-------|-------------|
 | Model | Cyan bold | Active model display name |
 | Progress bar | Green/Yellow/Red | 20-char block bar based on context % |
+| Window counter | Dim | Context compaction count (#1, #2, ...) |
 | Tokens | Green/Magenta | Input (↓) and output (↑) token counts |
 | Cache | Dim | Cache read/write token stats |
 
@@ -176,6 +197,23 @@ $COST | ⏱ DURATION (api API_DUR) | +ADDED/-REMOVED | ⎇ BRANCH | 📂 DIR | [
 | Vim mode | Blue/Green | Vim mode is active |
 | Agent | Cyan | Sub-agent is running |
 | >200K warning | Red | Tokens exceed 200K |
+
+### Line 3
+
+```
+5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
+```
+
+| Segment | Color | Description |
+|---------|-------|-------------|
+| 5h bar | Green/Yellow/Red | 5-hour usage remaining (fuel gauge style) |
+| 5h reset | Dim | Time until 5-hour quota resets |
+| 7d bar | Green/Yellow/Red | 7-day usage remaining |
+| 7d reset | Dim | Time until 7-day quota resets |
+
+Color thresholds: green (>50% remaining), yellow (20-50%), red (<20%).
+
+Line 3 only appears when usage data is available (OAuth login, not API key).
 
 ## Uninstall
 

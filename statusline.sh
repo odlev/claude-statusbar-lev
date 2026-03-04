@@ -3,10 +3,10 @@
 # https://github.com/vitalii/claude-statusline
 #
 # Displays real-time session metrics: model, context usage, tokens,
-# cost, duration, git branch, cache stats, and more.
+# cost, duration, git branch, cache stats, usage limits, and more.
 #
 # Claude Code pipes JSON to stdin with session data.
-# This script parses it and outputs a formatted two-line status bar.
+# This script parses it and outputs a formatted three-line status bar.
 
 input=$(cat)
 
@@ -150,6 +150,90 @@ elif [[ "${STATUSLINE_FLAGS:-1}" != "0" ]] && (( PCT < 10 )); then
     [[ -d "$FLAG_DIR" ]] && rm -f "$FLAG_DIR"/threshold-* 2>/dev/null
 fi
 
+# === Usage limits (subscription quota tracking) ===
+# Fetches 5-hour and 7-day usage limits from Anthropic OAuth API.
+# Cached for 2 minutes to avoid rate limiting. Background refresh.
+# Requires claude.ai OAuth login (not API key).
+# Set STATUSLINE_USAGE_LIMITS=0 to disable.
+# macOS: reads token from Keychain. Linux: reads from libsecret.
+USAGE_CACHE="$HOME/.claude/.usage-cache.json"
+HAS_USAGE=0
+
+if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
+    : "${NOW_EPOCH:=$(date +%s)}"
+    _cache_mtime=0
+    [[ -f "$USAGE_CACHE" ]] && {
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            _cache_mtime=$(stat -f %m "$USAGE_CACHE" 2>/dev/null || echo 0)
+        else
+            _cache_mtime=$(stat -c %Y "$USAGE_CACHE" 2>/dev/null || echo 0)
+        fi
+    }
+
+    # Background refresh every 2 minutes
+    if (( NOW_EPOCH - _cache_mtime > 120 )); then
+        [[ -f "$USAGE_CACHE" ]] || printf '{}' > "$USAGE_CACHE"
+        touch "$USAGE_CACHE"
+        (
+            # Extract OAuth token from platform-specific secure storage
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                _cred=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+            elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OSTYPE" == "win"* ]]; then
+                _cred=$(powershell.exe -NoProfile -Command \
+                    '[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String((Get-StoredCredential -Target "Claude Code-credentials" -AsCredentialObject).Password))' 2>/dev/null)
+            else
+                _cred=$(secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+            fi
+            [[ -n "$_cred" ]] || exit 1
+            _tk=$(printf '%s' "$_cred" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+            [[ -n "$_tk" ]] || exit 1
+            _d=$(curl -sf --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
+                -H "Authorization: Bearer $_tk" \
+                -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null)
+            [[ -n "$_d" ]] && printf '%s' "$_d" | jq -e '.five_hour' &>/dev/null && {
+                umask 077; printf '%s' "$_d" > "$USAGE_CACHE"
+            }
+        ) &>/dev/null &
+    fi
+
+    # Read cached data and compute remaining % and reset times
+    if [[ -f "$USAGE_CACHE" ]]; then
+        eval "$(jq -r --argjson now "$NOW_EPOCH" '
+            "U5H_USED=" + (.five_hour.utilization // 0 | floor | tostring | @sh),
+            "U7D_USED=" + (.seven_day.utilization // 0 | floor | tostring | @sh),
+            "U5H_LEFT=" + ((.five_hour.resets_at // "" | if . == "" or . == "null" then 0 else ((split(".")[0] + "Z" | fromdate) - $now | if . < 0 then 0 else . end) end) | tostring | @sh),
+            "U7D_LEFT=" + ((.seven_day.resets_at // "" | if . == "" or . == "null" then 0 else ((split(".")[0] + "Z" | fromdate) - $now | if . < 0 then 0 else . end) end) | tostring | @sh)
+        ' "$USAGE_CACHE" 2>/dev/null)"
+        : "${U5H_USED:=0}" "${U7D_USED:=0}" "${U5H_LEFT:=0}" "${U7D_LEFT:=0}"
+        U5H_REM=$(( 100 - U5H_USED )); (( U5H_REM < 0 )) && U5H_REM=0
+        U7D_REM=$(( 100 - U7D_USED )); (( U7D_REM < 0 )) && U7D_REM=0
+
+        # 5h bar (10 chars, fuel gauge: full=good, empty=danger)
+        _f=$((U5H_REM * 10 / 100)); (( _f > 10 )) && _f=10; (( _f < 0 )) && _f=0; _e=$((10 - _f))
+        if (( U5H_REM > 50 )); then C5='\033[32m'; elif (( U5H_REM > 20 )); then C5='\033[33m'; else C5='\033[31m'; fi
+        B5="$C5"; for ((i=0;i<_f;i++)); do B5+='█'; done; for ((i=0;i<_e;i++)); do B5+='░'; done; B5+='\033[0m'
+
+        # 7d bar (10 chars)
+        _f=$((U7D_REM * 10 / 100)); (( _f > 10 )) && _f=10; (( _f < 0 )) && _f=0; _e=$((10 - _f))
+        if (( U7D_REM > 50 )); then C7='\033[32m'; elif (( U7D_REM > 20 )); then C7='\033[33m'; else C7='\033[31m'; fi
+        B7="$C7"; for ((i=0;i<_f;i++)); do B7+='█'; done; for ((i=0;i<_e;i++)); do B7+='░'; done; B7+='\033[0m'
+
+        # Format 5h reset time (pure bash)
+        _s=${U5H_LEFT%%.*}; : "${_s:=0}"
+        _h=$((_s/3600)) _m=$(((_s%3600)/60))
+        if (( _h > 0 )); then T5H="${_h}h$(printf '%02d' $_m)m"; else T5H="${_m}m"; fi
+
+        # Format 7d reset time (pure bash, supports days)
+        _s=${U7D_LEFT%%.*}; : "${_s:=0}"
+        _d=$((_s/86400)) _h=$(((_s%86400)/3600)) _m=$(((_s%3600)/60))
+        if (( _d > 0 )); then T7D="${_d}d${_h}h"
+        elif (( _h > 0 )); then T7D="${_h}h$(printf '%02d' $_m)m"
+        else T7D="${_m}m"; fi
+
+        HAS_USAGE=1
+    fi
+fi
+
 # === ANSI shortcuts ===
 R='\033[0m' D='\033[2m' SEP=" ${D}|${R} "
 
@@ -175,3 +259,10 @@ L2=$(printf '\033[33m%s\033[0m%b\033[34m⏱ %s\033[0m %b(api %s)%b%b\033[32m+%s\
 [[ "$EXCEEDS_200K" == "true" ]] && L2+=$(printf ' \033[31m⚠ >200K\033[0m')
 
 printf '%b\n' "$L2"
+
+# === Line 3: Usage limits (5h + 7d with progress bars and reset countdown) ===
+if (( HAS_USAGE )); then
+    printf '%b5h%b [%b] %b%d%%%b %b↻%s%b%b%b7d%b [%b] %b%d%%%b %b↻%s%b\n' \
+        "$D" "$R" "$B5" "$C5" "$U5H_REM" "$R" "$D" "$T5H" "$R" \
+        "$SEP" "$D" "$R" "$B7" "$C7" "$U7D_REM" "$R" "$D" "$T7D" "$R"
+fi
