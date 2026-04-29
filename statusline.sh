@@ -226,6 +226,15 @@ fi
 GIT_BRANCH=""
 [[ -n "$CWD" && -d "$CWD/.git" ]] && GIT_BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null)
 
+# Effort level (reasoning effort) from settings.json
+# Lookup order matches Claude Code: project local, project, user global
+EFFORT=""
+for _settings in "$CWD/.claude/settings.local.json" "$CWD/.claude/settings.json" "$HOME/.claude/settings.json"; do
+    [[ -f "$_settings" ]] || continue
+    _e=$(jq -r '.effortLevel // empty' "$_settings" 2>/dev/null)
+    [[ -n "$_e" ]] && { EFFORT="$_e"; break; }
+done
+
 # Working directory name
 DIR_NAME="${CWD##*/}"
 
@@ -361,14 +370,26 @@ fi
 # === ANSI shortcuts ===
 R='\033[0m' D='\033[2m' SEP=" ${D}|${R} "
 
-# === Line 1: Model | Context bar % of size #window | Tokens in/out | Cache ===
+# Effort suffix (color by level: low=green, medium=yellow, high/max=red)
+EFFORT_FMT=""
+if [[ -n "$EFFORT" ]]; then
+    case "$EFFORT" in
+        low)      C_EFF='\033[32m' ;;
+        medium)   C_EFF='\033[33m' ;;
+        high|max) C_EFF='\033[31m' ;;
+        *)        C_EFF='\033[36m' ;;
+    esac
+    EFFORT_FMT=$(printf ' %b%s\033[0m' "$C_EFF" "$EFFORT")
+fi
+
+# === Line 1: Model Effort | Context bar % of size #window | Tokens in/out | Cache ===
 if [[ -n "$WIN_FMT" ]]; then
-    printf '\033[1m\033[36m%s\033[0m%b[%b%s%b] %d%% of %s %b%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
-        "$MODEL" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$WIN_FMT" "$SEP" \
+    printf '\033[1m\033[36m%s\033[0m%b%b[%b%s%b] %d%% of %s %b%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
+        "$MODEL" "$EFFORT_FMT" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$WIN_FMT" "$SEP" \
         "$IN_FMT" "$OUT_FMT" "$SEP" "$D" "$R" "$CACHE_R_FMT" "$CACHE_C_FMT"
 else
-    printf '\033[1m\033[36m%s\033[0m%b[%b%s%b] %d%% of %s%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
-        "$MODEL" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$SEP" \
+    printf '\033[1m\033[36m%s\033[0m%b%b[%b%s%b] %d%% of %s%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
+        "$MODEL" "$EFFORT_FMT" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$SEP" \
         "$IN_FMT" "$OUT_FMT" "$SEP" "$D" "$R" "$CACHE_R_FMT" "$CACHE_C_FMT"
 fi
 
