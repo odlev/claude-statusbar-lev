@@ -151,6 +151,7 @@ input=$(cat)
 # Uses @sh for safe shell escaping (compatible with macOS bash 3.2+)
 eval "$(echo "$input" | jq -r '
     "MODEL="    + (.model.display_name // "Unknown" | @sh),
+    "EFFORT="   + (.effort.level // "" | @sh),
     "CWD="      + (.cwd // "" | @sh),
     "VIM_MODE=" + (.vim.mode // "" | @sh),
     "AGENT_NAME=" + (.agent.name // "" | @sh),
@@ -225,15 +226,6 @@ fi
 # Git branch (only if inside a repo)
 GIT_BRANCH=""
 [[ -n "$CWD" && -d "$CWD/.git" ]] && GIT_BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null)
-
-# Effort level (reasoning effort) from settings.json
-# Lookup order matches Claude Code: project local, project, user global
-EFFORT=""
-for _settings in "$CWD/.claude/settings.local.json" "$CWD/.claude/settings.json" "$HOME/.claude/settings.json"; do
-    [[ -f "$_settings" ]] || continue
-    _e=$(jq -r '.effortLevel // empty' "$_settings" 2>/dev/null)
-    [[ -n "$_e" ]] && { EFFORT="$_e"; break; }
-done
 
 # Working directory name
 DIR_NAME="${CWD##*/}"
@@ -370,13 +362,15 @@ fi
 # === ANSI shortcuts ===
 R='\033[0m' D='\033[2m' SEP=" ${D}|${R} "
 
-# Effort suffix (color by level: low=green, medium=yellow, high/max=red)
+# Effort suffix - color by level (low=green, medium=yellow, high=red, xhigh=bright red, max=bold red)
 EFFORT_FMT=""
 if [[ -n "$EFFORT" ]]; then
     case "$EFFORT" in
         low)      C_EFF='\033[32m' ;;
         medium)   C_EFF='\033[33m' ;;
-        high|max) C_EFF='\033[31m' ;;
+        high)     C_EFF='\033[31m' ;;
+        xhigh)    C_EFF='\033[91m' ;;
+        max)      C_EFF='\033[1;31m' ;;
         *)        C_EFF='\033[36m' ;;
     esac
     EFFORT_FMT=$(printf ' %b%s\033[0m' "$C_EFF" "$EFFORT")
