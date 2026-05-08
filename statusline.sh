@@ -166,7 +166,9 @@ eval "$(echo "$input" | jq -r '
     "DURATION_MS="  + (.cost.total_duration_ms // 0 | tostring | @sh),
     "API_DURATION_MS=" + (.cost.total_api_duration_ms // 0 | tostring | @sh),
     "LINES_ADDED="  + (.cost.total_lines_added // 0 | tostring | @sh),
-    "LINES_REMOVED=" + (.cost.total_lines_removed // 0 | tostring | @sh)
+    "LINES_REMOVED=" + (.cost.total_lines_removed // 0 | tostring | @sh),
+    "SID="          + (.session_id // "" | @sh),
+    "TRANSCRIPT_PATH=" + (.transcript_path // "" | @sh)
 ')"
 
 # === Formatting helpers (pure bash, no subshells) ===
@@ -231,36 +233,59 @@ GIT_BRANCH=""
 DIR_NAME="${CWD##*/}"
 
 # === Window counter (context compaction tracking) ===
-# Tracks how many times the context window has been compacted during a session.
-# Detects compaction when input tokens drop below 40% of peak.
-# Resets on new session (>5min gap + low tokens).
+# Counts how many times the context window has been compacted in this session.
+# Compaction = PCT was hot (>=80%) at previous render, now cold (<30%): either
+# /clear or auto-compact at 95%. Smaller drops between renders are normal
+# (subagent results, large tool outputs) and must NOT increment the counter.
+# State is per-session at $FLAG_DIR/window-state.<session_id>; parallel sessions
+# don't pollute each other.
 # Set STATUSLINE_WINDOW_COUNTER=0 to disable.
 FLAG_DIR="${STATUSLINE_FLAG_DIR:-$HOME/.claude/.context-flags}"
 WINDOW_COUNT=1
 WIN_FMT=""
+GROWTH_FMT=""
+CUR_T=${INPUT_TOKENS%%.*}; : "${CUR_T:=0}"
+NOW_EPOCH=${NOW_EPOCH:-$(date +%s)}
 
 if [[ "${STATUSLINE_WINDOW_COUNTER:-1}" != "0" ]]; then
     [[ -d "$FLAG_DIR" ]] || mkdir -p "$FLAG_DIR"
-    WINDOW_STATE="$FLAG_DIR/window-state"
-    CUR_T=${INPUT_TOKENS%%.*}; : "${CUR_T:=0}"
-    NOW_EPOCH=$(date +%s)
+    # Per-session state: avoids cross-session counter pollution.
+    _sid_safe="${SID//[^A-Za-z0-9_-]/_}"
+    [[ -z "$_sid_safe" ]] && _sid_safe="global"
+    WINDOW_STATE="$FLAG_DIR/window-state.$_sid_safe"
 
+    W_PREV_PCT=0 W_PREV_T=0 W_PREV_EPOCH=0
     if [[ -f "$WINDOW_STATE" ]]; then
-        read -r W_COUNT W_PEAK W_EPOCH < "$WINDOW_STATE"
-        : "${W_COUNT:=1}" "${W_PEAK:=0}" "${W_EPOCH:=0}"
-        if (( NOW_EPOCH - W_EPOCH > 300 && CUR_T < 5000 )); then
-            WINDOW_COUNT=1; W_PEAK=$CUR_T
-        elif (( W_PEAK > 30000 && CUR_T < W_PEAK * 4 / 10 )); then
-            WINDOW_COUNT=$((W_COUNT + 1)); W_PEAK=$CUR_T
+        read -r W_COUNT W_PREV_PCT W_PREV_T W_PREV_EPOCH < "$WINDOW_STATE"
+        : "${W_COUNT:=1}" "${W_PREV_PCT:=0}" "${W_PREV_T:=0}" "${W_PREV_EPOCH:=0}"
+        # Compact: was hot, now cold. Single transition per render.
+        if (( W_PREV_PCT >= 80 && PCT < 30 )); then
+            WINDOW_COUNT=$((W_COUNT + 1))
         else
             WINDOW_COUNT=$W_COUNT
-            (( CUR_T > W_PEAK )) && W_PEAK=$CUR_T
         fi
-    else
-        W_PEAK=$CUR_T
     fi
-    printf '%d %d %d' "$WINDOW_COUNT" "$W_PEAK" "$NOW_EPOCH" > "$WINDOW_STATE"
+    printf '%d %d %d %d' "$WINDOW_COUNT" "$PCT" "$CUR_T" "$NOW_EPOCH" > "$WINDOW_STATE"
     WIN_FMT="\033[2m#${WINDOW_COUNT}\033[0m"
+
+    # === Context growth rate ===
+    # Delta of input_tokens since previous render. Surfaces sudden inflows
+    # (huge tool result, subagent return, big file Read) so you can react
+    # before context fills up - kill the bloated subagent, /save and /clear,
+    # or swap to a leaner approach. Hidden when delta is negligible (<2K) or
+    # negative (a compact just happened).
+    if (( W_PREV_T > 0 && W_PREV_EPOCH > 0 )); then
+        _delta=$((CUR_T - W_PREV_T))
+        if (( _delta >= 2000 )); then
+            _delta_fmt=$(fmt_tokens "$_delta")
+            # Color by per-render burst severity
+            if   (( _delta >= 30000 )); then _gc='\033[31m'
+            elif (( _delta >= 10000 )); then _gc='\033[33m'
+            else                              _gc='\033[32m'
+            fi
+            GROWTH_FMT=$(printf ' %b+%s\033[0m' "$_gc" "$_delta_fmt")
+        fi
+    fi
 fi
 
 # === Optional: Context threshold flags ===
@@ -376,21 +401,34 @@ if [[ -n "$EFFORT" ]]; then
     EFFORT_FMT=$(printf ' %b%s\033[0m' "$C_EFF" "$EFFORT")
 fi
 
-# === Line 1: Model Effort | Context bar % of size #window | Tokens in/out | Cache ===
-if [[ -n "$WIN_FMT" ]]; then
-    printf '\033[1m\033[36m%s\033[0m%b%b[%b%s%b] %d%% of %s %b%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
-        "$MODEL" "$EFFORT_FMT" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$WIN_FMT" "$SEP" \
-        "$IN_FMT" "$OUT_FMT" "$SEP" "$D" "$R" "$CACHE_R_FMT" "$CACHE_C_FMT"
-else
-    printf '\033[1m\033[36m%s\033[0m%b%b[%b%s%b] %d%% of %s%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
-        "$MODEL" "$EFFORT_FMT" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$SEP" \
-        "$IN_FMT" "$OUT_FMT" "$SEP" "$D" "$R" "$CACHE_R_FMT" "$CACHE_C_FMT"
+# === Errors count (current session) ===
+# Counts tool_result blocks with is_error:true in the session transcript.
+# Surfaces denied permissions, failed builds, broken edits - signal that the
+# model is fighting the environment. Hidden when zero.
+ERR_FMT=""
+if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
+    _err_count=$(grep -c '"is_error":[[:space:]]*true' "$TRANSCRIPT_PATH" 2>/dev/null || printf '0')
+    _err_count=${_err_count%%[!0-9]*}
+    : "${_err_count:=0}"
+    if (( _err_count > 0 )); then
+        ERR_FMT=$(printf '%b\033[31merr:%d\033[0m' "$SEP" "$_err_count")
+    fi
 fi
 
-# === Line 2: Cost | Duration | Lines | Git | Dir | extras ===
+# === Line 1: Model Effort | Context bar % of size #window growth ===
+if [[ -n "$WIN_FMT" ]]; then
+    printf '\033[1m\033[36m%s\033[0m%b%b[%b%s%b] %d%% of %s %b%b\n' \
+        "$MODEL" "$EFFORT_FMT" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$WIN_FMT" "$GROWTH_FMT"
+else
+    printf '\033[1m\033[36m%s\033[0m%b%b[%b%s%b] %d%% of %s%b\n' \
+        "$MODEL" "$EFFORT_FMT" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$GROWTH_FMT"
+fi
+
+# === Line 2: Cost | Duration | Lines | Errors | Git | Dir | extras ===
 L2=$(printf '\033[33m%s\033[0m%b\033[34m⏱ %s\033[0m %b(api %s)%b%b\033[32m+%s\033[0m/\033[31m-%s\033[0m' \
     "$COST_FMT" "$SEP" "$DURATION_FMT" "$D" "$API_DUR_FMT" "$R" "$SEP" "$LINES_ADDED" "$LINES_REMOVED")
 
+[[ -n "$ERR_FMT" ]]    && L2+="$ERR_FMT"
 [[ -n "$GIT_BRANCH" ]] && L2+=$(printf '%b\033[35m⎇ %s\033[0m' "$SEP" "$GIT_BRANCH")
 [[ -n "$DIR_NAME" ]]   && L2+=$(printf '%b%b📂 %s%b' "$SEP" "$D" "$DIR_NAME" "$R")
 [[ -n "$VIM_MODE" ]]   && { [[ "$VIM_MODE" == "NORMAL" ]] && L2+=$(printf '%b\033[34m[N]\033[0m' "$SEP") || L2+=$(printf '%b\033[32m[I]\033[0m' "$SEP"); }
