@@ -254,10 +254,10 @@ if [[ "${STATUSLINE_WINDOW_COUNTER:-1}" != "0" ]]; then
     [[ -z "$_sid_safe" ]] && _sid_safe="global"
     WINDOW_STATE="$FLAG_DIR/window-state.$_sid_safe"
 
-    W_PREV_PCT=0 W_PREV_T=0 W_PREV_EPOCH=0
+    W_PREV_PCT=0 W_PREV_T=0 W_PREV_EPOCH=0 W_EMA=0
     if [[ -f "$WINDOW_STATE" ]]; then
-        read -r W_COUNT W_PREV_PCT W_PREV_T W_PREV_EPOCH < "$WINDOW_STATE"
-        : "${W_COUNT:=1}" "${W_PREV_PCT:=0}" "${W_PREV_T:=0}" "${W_PREV_EPOCH:=0}"
+        read -r W_COUNT W_PREV_PCT W_PREV_T W_PREV_EPOCH W_EMA < "$WINDOW_STATE"
+        : "${W_COUNT:=1}" "${W_PREV_PCT:=0}" "${W_PREV_T:=0}" "${W_PREV_EPOCH:=0}" "${W_EMA:=0}"
         # Compact: was hot, now cold. Single transition per render.
         if (( W_PREV_PCT >= 80 && PCT < 30 )); then
             WINDOW_COUNT=$((W_COUNT + 1))
@@ -265,27 +265,36 @@ if [[ "${STATUSLINE_WINDOW_COUNTER:-1}" != "0" ]]; then
             WINDOW_COUNT=$W_COUNT
         fi
     fi
-    printf '%d %d %d %d' "$WINDOW_COUNT" "$PCT" "$CUR_T" "$NOW_EPOCH" > "$WINDOW_STATE"
     WIN_FMT="\033[2m#${WINDOW_COUNT}\033[0m"
 
-    # === Context growth rate ===
-    # Delta of input_tokens since previous render. Surfaces sudden inflows
-    # (huge tool result, subagent return, big file Read) so you can react
-    # before context fills up - kill the bloated subagent, /save and /clear,
-    # or swap to a leaner approach. Hidden when delta is negligible (<2K) or
-    # negative (a compact just happened).
-    if (( W_PREV_T > 0 && W_PREV_EPOCH > 0 )); then
-        _delta=$((CUR_T - W_PREV_T))
-        if (( _delta >= 2000 )); then
-            _delta_fmt=$(fmt_tokens "$_delta")
-            # Color by per-render burst severity
-            if   (( _delta >= 30000 )); then _gc='\033[31m'
-            elif (( _delta >= 10000 )); then _gc='\033[33m'
-            else                              _gc='\033[32m'
-            fi
-            GROWTH_FMT=$(printf ' %b+%s\033[0m' "$_gc" "$_delta_fmt")
-        fi
+    # === Context fill rate (EMA) ===
+    # Exponential moving average of input_tokens growth in tokens/minute.
+    # Smooths one-off bursts (a single big Read) so you see SUSTAINED fill
+    # rate, not noise. Per-session: state lives in window-state.<session_id>,
+    # parallel Claude Code chats keep their own counters and rates.
+    # Reset on a compact (CUR_T dropped below previous) or first render.
+    NEW_EMA=$W_EMA
+    if (( W_PREV_T > 0 && W_PREV_EPOCH > 0 && CUR_T >= W_PREV_T )); then
+        _dt=$((NOW_EPOCH - W_PREV_EPOCH))
+        (( _dt < 1 )) && _dt=1
+        # tokens/minute since last render
+        _inst=$(( (CUR_T - W_PREV_T) * 60 / _dt ))
+        # alpha=0.3: NEW = 0.3*inst + 0.7*old (integer math, *10 to keep precision)
+        NEW_EMA=$(( (3 * _inst + 7 * W_EMA) / 10 ))
+    elif (( CUR_T < W_PREV_T )); then
+        NEW_EMA=0
     fi
+
+    if (( NEW_EMA >= 1000 )); then
+        _rate_fmt=$(fmt_tokens "$NEW_EMA")
+        if   (( NEW_EMA >= 15000 )); then _gc='\033[31m'   # red - context will fill fast
+        elif (( NEW_EMA >=  5000 )); then _gc='\033[33m'   # yellow - moving briskly
+        else                              _gc='\033[32m'   # green - normal
+        fi
+        GROWTH_FMT=$(printf ' %b+%s/m\033[0m' "$_gc" "$_rate_fmt")
+    fi
+
+    printf '%d %d %d %d %d' "$WINDOW_COUNT" "$PCT" "$CUR_T" "$NOW_EPOCH" "$NEW_EMA" > "$WINDOW_STATE"
 fi
 
 # === Optional: Context threshold flags ===
@@ -401,20 +410,6 @@ if [[ -n "$EFFORT" ]]; then
     EFFORT_FMT=$(printf ' %b%s\033[0m' "$C_EFF" "$EFFORT")
 fi
 
-# === Errors count (current session) ===
-# Counts tool_result blocks with is_error:true in the session transcript.
-# Surfaces denied permissions, failed builds, broken edits - signal that the
-# model is fighting the environment. Hidden when zero.
-ERR_FMT=""
-if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
-    _err_count=$(grep -c '"is_error":[[:space:]]*true' "$TRANSCRIPT_PATH" 2>/dev/null || printf '0')
-    _err_count=${_err_count%%[!0-9]*}
-    : "${_err_count:=0}"
-    if (( _err_count > 0 )); then
-        ERR_FMT=$(printf '%b\033[31merr:%d\033[0m' "$SEP" "$_err_count")
-    fi
-fi
-
 # === Line 1: Model Effort | Context bar % of size #window growth ===
 if [[ -n "$WIN_FMT" ]]; then
     printf '\033[1m\033[36m%s\033[0m%b%b[%b%s%b] %d%% of %s %b%b\n' \
@@ -428,7 +423,6 @@ fi
 L2=$(printf '\033[33m%s\033[0m%b\033[34m⏱ %s\033[0m %b(api %s)%b%b\033[32m+%s\033[0m/\033[31m-%s\033[0m' \
     "$COST_FMT" "$SEP" "$DURATION_FMT" "$D" "$API_DUR_FMT" "$R" "$SEP" "$LINES_ADDED" "$LINES_REMOVED")
 
-[[ -n "$ERR_FMT" ]]    && L2+="$ERR_FMT"
 [[ -n "$GIT_BRANCH" ]] && L2+=$(printf '%b\033[35m⎇ %s\033[0m' "$SEP" "$GIT_BRANCH")
 [[ -n "$DIR_NAME" ]]   && L2+=$(printf '%b%b📂 %s%b' "$SEP" "$D" "$DIR_NAME" "$R")
 [[ -n "$VIM_MODE" ]]   && { [[ "$VIM_MODE" == "NORMAL" ]] && L2+=$(printf '%b\033[34m[N]\033[0m' "$SEP") || L2+=$(printf '%b\033[32m[I]\033[0m' "$SEP"); }

@@ -1,17 +1,33 @@
-# claude-statusline
+# claude-statusbar-lev
 
-> A rich, three-line status bar for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI — works on **macOS, Linux, WSL2, and Windows**.
+> Personal fork of [vbcherepanov/claude-statusbar](https://github.com/vbcherepanov/claude-statusbar) with extra signals and a leaner first line.
 
-[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal)](https://paypal.me/VitaliiCherepanov)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey)](#platform-support)
 
-Displays real-time session metrics directly in your terminal — model, context usage, tokens, cost, duration, git branch, cache stats, subscription usage limits, and more.
+Three-line status bar for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI: model, effort, context usage, cost, duration, git, errors, 5h/7d subscription limits.
 
 ```
-Claude Opus 4.6 | [████████░░░░░░░░░░░░] 42% of 200.0K #1 | ↓156.8K ↑23.4K | cache r:89.0K w:45.0K
+Claude Opus 4.7 medium | [████████░░░░░░░░░░░░] 42% of 1.0M #1 +8K/m
 $1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ main | 📂 my-project | [N]
 5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
+```
+
+## Что отличается от upstream
+
+- **Per-session window counter (`#N`)**. State хранится per-`session_id` (`window-state.<session_id>`), параллельные Claude Code чаты не пачкают друг другу счётчик. Считаются только реальные compact-события (PCT 80%+ -> <30%), не любой drop input_tokens.
+- **Context fill rate, EMA tokens/min (`+8K/m`)**. Экспоненциально сглаженный темп заполнения контекста. Видно УСТОЙЧИВУЮ скорость заполнения (red >15K/min, yellow >5K/min, green иначе), не разовые burst'ы. Хранится в том же per-session state. Скрыт когда темп <1K/min или после compact (сбрасывается).
+- **Тоньше первая строка**. Убран блок `↓in ↑out cache r/w` - все эти числа есть в `/cost`, на каждый рендер не нужно.
+- **Effort level в первой строке**. Цвет по уровню (low=зелёный, medium=жёлтый, high=красный, max=жирный красный). Читается из stdin `.effort.level`, не из глобального `settings.json`.
+- **GNU stat fix**. На Linux `_stat_mtime` теперь использует `stat -c %Y` первым (BSD `-f %m` фоллбэк). Без этого фикса на GNU coreutils 5h/7d countdown зависает на `↻0m` навсегда после первого протухания кеша.
+- **Linux OAuth credentials fallback**. На Linux токен лежит в `~/.claude/.credentials.json`, а не в keyring - поэтому usage limits не показывают `100%`.
+
+## Sync с upstream
+
+```bash
+git remote add upstream https://github.com/vbcherepanov/claude-statusbar
+git fetch upstream
+git merge upstream/main   # или rebase
 ```
 
 ---
