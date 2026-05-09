@@ -225,7 +225,7 @@ elif (( PCT >= 70 )); then C_CTX='\033[33m'  # yellow
 else C_CTX='\033[32m'                         # green
 fi
 
-# Git branch + ahead/behind vs upstream (only if inside a repo with upstream)
+# Git branch + ahead/behind vs upstream + divergence from base (main/master)
 GIT_BRANCH=""
 GIT_AB=""
 if [[ -n "$CWD" && -d "$CWD/.git" ]]; then
@@ -239,6 +239,32 @@ if [[ -n "$CWD" && -d "$CWD/.git" ]]; then
             : "${_behind:=0}" "${_ahead:=0}"
             (( _ahead > 0 ))  && GIT_AB+=$(printf ' \033[32m\xe2\x86\x91%d\033[0m' "$_ahead")
             (( _behind > 0 )) && GIT_AB+=$(printf ' \033[31m\xe2\x86\x93%d\033[0m' "$_behind")
+        fi
+    fi
+    # Divergence from default base (main/master/develop): how many commits the
+    # base has moved ahead while you've been on this feature branch. Signal
+    # that you should rebase / merge base before the gap grows further.
+    # Hidden when current branch IS the base, when no base exists, or when
+    # behind=0. Toggle: STATUSLINE_GIT_DIVERGE_BASE=0
+    if [[ "${STATUSLINE_GIT_DIVERGE_BASE:-1}" != "0" && -n "$GIT_BRANCH" ]]; then
+        _base=""
+        for _candidate in main master develop; do
+            if [[ "$GIT_BRANCH" != "$_candidate" ]] && \
+               git -C "$CWD" rev-parse --verify --quiet "$_candidate" >/dev/null 2>&1; then
+                _base="$_candidate"
+                break
+            fi
+        done
+        if [[ -n "$_base" ]]; then
+            _bb=$(git -C "$CWD" rev-list --count "HEAD..$_base" 2>/dev/null)
+            : "${_bb:=0}"
+            if (( _bb > 0 )); then
+                if   (( _bb >= 20 )); then _bc='\033[31m'   # red - rebase overdue
+                elif (( _bb >=  5 )); then _bc='\033[33m'   # yellow - getting stale
+                else                       _bc='\033[32m'   # green - fresh
+                fi
+                GIT_AB+=$(printf ' %b\xe2\x87\xa3%d\033[0m' "$_bc" "$_bb")
+            fi
         fi
     fi
 fi
