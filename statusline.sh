@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude-statusline — Rich status line for Claude Code CLI
+# claude-statusline - Rich status line for Claude Code CLI
 # https://github.com/vbcherepanov/claude-statusbar
 #
 # Displays real-time session metrics: model, context usage, tokens,
@@ -124,7 +124,7 @@ case "${1:-}" in
         ;;
     --help|-h)
         cat <<EOF
-claude-statusline $STATUSLINE_VERSION — status line for Claude Code CLI
+claude-statusline $STATUSLINE_VERSION - status line for Claude Code CLI
 
 Usage: piped from Claude Code (configured in ~/.claude/settings.json)
        cat examples/sample-input.json | bash statusline.sh   # smoke test
@@ -173,7 +173,7 @@ eval "$(echo "$input" | jq -r '
 
 # === Formatting helpers (pure bash, no subshells) ===
 
-# Format token count: 1500 → "1.5K", 2300000 → "2.3M"
+# Format token count: 1500 -> "1.5K", 2300000 -> "2.3M"
 fmt_tokens() {
     local t=${1%%.*}; : "${t:=0}"
     if (( t >= 1000000 )); then
@@ -185,7 +185,7 @@ fmt_tokens() {
     fi
 }
 
-# Format milliseconds: 65000 → "1m05s", 3700000 → "1h01m"
+# Format milliseconds: 65000 -> "1m05s", 3700000 -> "1h01m"
 fmt_duration() {
     local ms=${1%%.*}; : "${ms:=0}"
     (( ms <= 0 )) && { printf '0s'; return; }
@@ -214,20 +214,34 @@ COST_DEC=${COST#*.}
 COST_DEC="${COST_DEC}00"; COST_DEC=${COST_DEC:0:2}
 COST_FMT="\$${COST_INT}.${COST_DEC}"
 
-# Progress bar — 20-char wide block bar
+# Progress bar - 20-char wide block bar
 BAR=""; FILLED=$((PCT * 20 / 100))
 for ((i=0; i<FILLED; i++)); do BAR+='█'; done
 for ((i=FILLED; i<20; i++)); do BAR+='░'; done
 
-# Context usage color: green → yellow → red
+# Context usage color: green -> yellow -> red
 if (( PCT >= 90 )); then C_CTX='\033[31m'   # red
 elif (( PCT >= 70 )); then C_CTX='\033[33m'  # yellow
 else C_CTX='\033[32m'                         # green
 fi
 
-# Git branch (only if inside a repo)
+# Git branch + ahead/behind vs upstream (only if inside a repo with upstream)
 GIT_BRANCH=""
-[[ -n "$CWD" && -d "$CWD/.git" ]] && GIT_BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null)
+GIT_AB=""
+if [[ -n "$CWD" && -d "$CWD/.git" ]]; then
+    GIT_BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null)
+    if [[ "${STATUSLINE_GIT_AHEAD_BEHIND:-1}" != "0" && -n "$GIT_BRANCH" ]]; then
+        # `--left-right --count @{u}...HEAD` -> "<behind>\t<ahead>" if upstream exists
+        _ab=$(git -C "$CWD" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null)
+        if [[ -n "$_ab" ]]; then
+            _behind=${_ab%%[!0-9]*}
+            _ahead=${_ab##*[!0-9]}
+            : "${_behind:=0}" "${_ahead:=0}"
+            (( _ahead > 0 ))  && GIT_AB+=$(printf ' \033[32m\xe2\x86\x91%d\033[0m' "$_ahead")
+            (( _behind > 0 )) && GIT_AB+=$(printf ' \033[31m\xe2\x86\x93%d\033[0m' "$_behind")
+        fi
+    fi
+fi
 
 # Working directory name
 DIR_NAME="${CWD##*/}"
@@ -327,8 +341,8 @@ fi
 # Requires claude.ai OAuth login (not API key).
 # Set STATUSLINE_USAGE_LIMITS=0 to disable.
 #
-# Credential source per platform (see _get_cred): macOS Keychain → Windows Credential Manager
-# → libsecret (Linux), each with fallback to ~/.claude/.credentials.json.
+# Credential source per platform (see _get_cred): macOS Keychain -> Windows Credential Manager
+# -> libsecret (Linux), each with fallback to ~/.claude/.credentials.json.
 USAGE_CACHE="$HOME/.claude/.usage-cache.json"
 HAS_USAGE=0
 
@@ -338,7 +352,7 @@ if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
     _cache_size=0
     [[ -f "$USAGE_CACHE" ]] && _cache_size=$(wc -c < "$USAGE_CACHE" 2>/dev/null || echo 0)
 
-    # Cold start: no cache or empty — must fetch sync so user sees data on first run.
+    # Cold start: no cache or empty - must fetch sync so user sees data on first run.
     # Warm refresh: background on macOS/Windows (child survives parent exit),
     #               sync on Linux/WSL (Claude Code kills child processes on exit).
     _is_cold=0
@@ -423,7 +437,7 @@ fi
 L2=$(printf '\033[33m%s\033[0m%b\033[34m⏱ %s\033[0m %b(api %s)%b%b\033[32m+%s\033[0m/\033[31m-%s\033[0m' \
     "$COST_FMT" "$SEP" "$DURATION_FMT" "$D" "$API_DUR_FMT" "$R" "$SEP" "$LINES_ADDED" "$LINES_REMOVED")
 
-[[ -n "$GIT_BRANCH" ]] && L2+=$(printf '%b\033[35m⎇ %s\033[0m' "$SEP" "$GIT_BRANCH")
+[[ -n "$GIT_BRANCH" ]] && L2+=$(printf '%b\033[35m⎇ %s\033[0m%b' "$SEP" "$GIT_BRANCH" "$GIT_AB")
 [[ -n "$DIR_NAME" ]]   && L2+=$(printf '%b%b📂 %s%b' "$SEP" "$D" "$DIR_NAME" "$R")
 [[ -n "$VIM_MODE" ]]   && { [[ "$VIM_MODE" == "NORMAL" ]] && L2+=$(printf '%b\033[34m[N]\033[0m' "$SEP") || L2+=$(printf '%b\033[32m[I]\033[0m' "$SEP"); }
 [[ -n "$AGENT_NAME" ]] && L2+=$(printf '%b\033[36m🤖 %s\033[0m' "$SEP" "$AGENT_NAME")
